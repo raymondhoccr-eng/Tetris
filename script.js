@@ -37,12 +37,14 @@ const PIECES = [
 
 let board = [];
 let score = 0;
+let lastDisplayedScore = -1; // To track the last displayed score
 let gameOver = false;
 let currentPiece;
 let currentX;
 let currentY;
-let gameLoopInterval;
 let dropSpeed = 1000; // Milliseconds per drop step
+let lastDropTime = 0;
+let animationFrameId = null;
 
 // --- Game Board ---
 
@@ -85,6 +87,16 @@ function spawnPiece() {
 }
 
 // --- Drawing ---
+
+function clearPiece(x, y, shape) {
+    shape.forEach((row, rY) => {
+        row.forEach((value, cX) => {
+            if (value !== 0) {
+                drawBlock(x + cX, y + rY, 0); // Draw EMPTY_COLOR (index 0)
+            }
+        });
+    });
+}
 
 function drawBlock(x, y, colorIndex) {
     context.fillStyle = COLORS[colorIndex] || EMPTY_COLOR;
@@ -130,12 +142,14 @@ function isValidMove(newX, newY, pieceShape) {
 }
 
 function movePiece(dx, dy) {
-    if (gameOver) return;
+    if (gameOver) return false;
     const newX = currentPiece.x + dx;
     const newY = currentPiece.y + dy;
     if (isValidMove(newX, newY, currentPiece.shape)) {
+        clearPiece(currentPiece.x, currentPiece.y, currentPiece.shape);
         currentPiece.x = newX;
         currentPiece.y = newY;
+        drawPiece();
         return true; // Move was successful
     }
     return false; // Move failed
@@ -143,8 +157,12 @@ function movePiece(dx, dy) {
 
 function rotatePiece() {
     if (gameOver) return;
+    const originalShape = currentPiece.shape.map(row => [...row]); // Deep copy for clearing
+    const originalX = currentPiece.x;
+    const originalY = currentPiece.y;
+
     // Basic rotation (clockwise) - transpose and reverse rows
-    const shape = currentPiece.shape;
+    const shape = currentPiece.shape; // This is what will be modified
     const N = shape.length; // Assume square for simplicity of first transpose step
     const M = shape[0].length;
     const newShape = Array.from({ length: M }, () => Array(N).fill(0));
@@ -157,28 +175,42 @@ function rotatePiece() {
         }
     }
 
-    // Check if rotation is valid (potentially needs wall kick logic for finesse)
+    // Check if rotation is valid
+    let rotated = false;
     if (isValidMove(currentPiece.x, currentPiece.y, newShape)) {
+        clearPiece(originalX, originalY, originalShape);
         currentPiece.shape = newShape;
+        drawPiece();
+        rotated = true;
     } else {
-       // Optional: Add basic wall kick logic here if needed
-       // Try moving left/right slightly if rotation failed
+       // Try wall kick: move right
        if (isValidMove(currentPiece.x + 1, currentPiece.y, newShape)) {
+           clearPiece(originalX, originalY, originalShape);
            currentPiece.x += 1;
            currentPiece.shape = newShape;
-       } else if (isValidMove(currentPiece.x - 1, currentPiece.y, newShape)) {
+           drawPiece();
+           rotated = true;
+       } else if (isValidMove(currentPiece.x - 1, currentPiece.y, newShape)) { // Try wall kick: move left
+           clearPiece(originalX, originalY, originalShape);
            currentPiece.x -= 1;
            currentPiece.shape = newShape;
+           drawPiece();
+           rotated = true;
        }
+       // If still not rotated, currentPiece.shape remains the original.
+       // No need to restore explicitly if clear/draw only happens on success.
     }
+    // If rotation happened, originalX/Y and originalShape were used for clearing.
+    // currentPiece.x/y and currentPiece.shape are now the new state.
 }
 
 function hardDrop() {
     if (gameOver) return;
+    // movePiece now handles clearing and drawing for each step
     while (movePiece(0, 1)) {
         // Keep moving down until it fails
     }
-    // Lock immediately after hard drop
+    // lockPiece will handle final board draw
     lockPiece();
 }
 
@@ -197,24 +229,44 @@ function lockPiece() {
         });
     });
 
-    clearLines();
+    clearLines(); // This might change the board
+    drawBoard();  // Redraw the board with the locked piece and after lines clear
     spawnPiece(); // Spawn the next piece
+    if (!gameOver) { // Only draw if spawnPiece didn't end the game
+      drawPiece();  // Draw the newly spawned piece
+    }
     updateScoreDisplay(); // Update score after potential line clear
 }
 
 function clearLines() {
     let linesCleared = 0;
-    for (let r = ROWS - 1; r >= 0; ) { // Iterate bottom-up
-        if (board[r].every(cell => cell !== 0)) {
-            // Line is full
+    let writeRow = ROWS - 1; // Points to where the next kept row should be written
+
+    // Iterate from bottom to top (readRow)
+    for (let readRow = ROWS - 1; readRow >= 0; readRow--) {
+        if (board[readRow].every(cell => cell !== 0)) {
+            // This line is full
             linesCleared++;
-            // Remove the row
-            board.splice(r, 1);
-            // Add a new empty row at the top
-            board.unshift(Array(COLS).fill(0));
-            // Don't decrement 'r' here, check the new row at the same index
+            // Don't copy this row, just increment linesCleared.
+            // writeRow remains, waiting for a non-full row from above,
+            // or it will eventually mark the start of empty rows at the top.
         } else {
-            r--; // Move to the next row up
+            // This line is not full, so keep it.
+            // If lines have been cleared below it, this will copy it down.
+            if (readRow !== writeRow) {
+                board[writeRow] = board[readRow];
+            }
+            writeRow--; // Move writeRow up for the next kept row
+        }
+    }
+
+    // Fill the top rows that were cleared
+    // writeRow is now pointing to the row index above the highest kept row
+    // (or -1 if all rows were cleared).
+    // So, rows from 0 to writeRow (inclusive) need to be filled with empty lines.
+    if (linesCleared > 0) {
+        for (let i = 0; i <= writeRow; i++) {
+            board[i] = Array(COLS).fill(0);
         }
     }
 
@@ -230,31 +282,47 @@ function clearLines() {
 
 // --- Game Loop ---
 
-function gameLoop() {
+function gameTick(timestamp) {
     if (gameOver) return;
 
-    // Try moving down
-    if (!movePiece(0, 1)) {
-        // If move down failed, lock the piece
-        lockPiece();
-         // Check game over again in case spawnPiece failed immediately
-        if (gameOver) return;
+    const deltaTime = timestamp - lastDropTime;
+
+    if (deltaTime >= dropSpeed) {
+        clearPiece(currentPiece.x, currentPiece.y, currentPiece.shape); // Clear before moving
+        if (!movePiece(0, 1)) { // Try moving down
+            // If move down failed, piece couldn't move. Redraw it at current spot before locking.
+            drawPiece();
+            lockPiece();
+            // Check game over again in case spawnPiece failed immediately
+            if (gameOver) return;
+        }
+        // If movePiece was successful, it already called drawPiece().
+        // If movePiece failed and lockPiece was called, lockPiece handles board/new piece drawing.
+        lastDropTime = timestamp; // Reset lastDropTime after a drop attempt
+    }
+}
+
+function gameLoop(timestamp) {
+    if (gameOver) {
+        // cancelAnimationFrame(animationFrameId); // endGame will handle this
+        return;
     }
 
-    // Clear canvas and redraw everything
-    context.clearRect(0, 0, canvas.width, canvas.height); // Clear the entire canvas
-    drawBoard();
-    drawPiece();
+    gameTick(timestamp); // Process game logic (includes piece movement and drawing)
 
-     // Reset interval if speed changed
-    clearInterval(gameLoopInterval);
-    gameLoopInterval = setInterval(gameLoop, dropSpeed);
+    // No general clear/drawBoard/drawPiece here anymore.
+    // Those are handled by specific actions (startGame, lockPiece, movePiece, rotatePiece).
+
+    animationFrameId = requestAnimationFrame(gameLoop); // Request next frame
 }
 
 // --- Game State ---
 
 function updateScoreDisplay() {
-    scoreElement.textContent = score;
+    if (score !== lastDisplayedScore) {
+        scoreElement.textContent = score;
+        lastDisplayedScore = score;
+    }
 }
 
 function startGame() {
@@ -262,15 +330,26 @@ function startGame() {
     gameOverMessage.style.display = 'none'; // Hide game over message
     gameOver = false;
     score = 0;
+    // lastDisplayedScore is not reset to -1 here, because updateScoreDisplay()
+    // will be called and correctly update to 0 if it was different.
+    // Or, to ensure it always updates on new game:
+    lastDisplayedScore = -1; // Force update on new game start
     dropSpeed = 1000;
-    updateScoreDisplay();
+    updateScoreDisplay(); // This will now set scoreElement.textContent = 0 and lastDisplayedScore = 0
     createBoard();
+    drawBoard(); // Draw the initial empty board
     spawnPiece();
-    // Clear any previous interval
-    if (gameLoopInterval) {
-        clearInterval(gameLoopInterval);
+    if (!gameOver) { // Only draw if spawnPiece didn't end the game
+        drawPiece(); // Draw the first piece
     }
-    gameLoopInterval = setInterval(gameLoop, dropSpeed);
+    lastDropTime = 0; // Reset drop timer
+
+    // Stop any previous loop before starting a new one
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+    }
+    animationFrameId = requestAnimationFrame(gameLoop); // Start the new game loop
+
     // Add keyboard listener only when game starts
     document.addEventListener('keydown', handleKeyPress);
     canvas.focus(); // Focus canvas if needed for key events
@@ -278,7 +357,9 @@ function startGame() {
 
 function endGame() {
     gameOver = true;
-    clearInterval(gameLoopInterval);
+    if (animationFrameId) {
+        cancelAnimationFrame(animationFrameId);
+    }
     document.removeEventListener('keydown', handleKeyPress); // Remove listener
     finalScoreElement.textContent = score;
     gameOverMessage.style.display = 'block'; // Show game over message
@@ -304,9 +385,11 @@ function handleKeyPress(event) {
             if (!movePiece(0, 1)) {
                 lockPiece(); // Lock if it can't move down
             } else {
-                // Reset timer to make soft drop feel responsive
-                clearInterval(gameLoopInterval);
-                 gameLoopInterval = setInterval(gameLoop, dropSpeed);
+                // With requestAnimationFrame, the drop is continuous.
+                // For soft drop, we can reset lastDropTime to make the next drop happen sooner,
+                // or simply let the natural drop speed continue.
+                // For now, just moving it down is enough, gameLoop will handle timing.
+                lastDropTime = performance.now(); // Make the next drop happen sooner after manual drop
             }
             break;
         case 'ArrowUp':
@@ -320,11 +403,12 @@ function handleKeyPress(event) {
     }
 
     // Redraw immediately after input for responsiveness
-    if (!gameOver) {
-        context.clearRect(0, 0, canvas.width, canvas.height);
-        drawBoard();
-        drawPiece();
-    }
+    // This is now handled by movePiece and rotatePiece directly.
+    // if (!gameOver) {
+        // context.clearRect(0, 0, canvas.width, canvas.height);
+        // drawBoard();
+        // drawPiece();
+    // }
 }
 
 // --- Event Listeners ---
