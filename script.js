@@ -22,7 +22,8 @@ const COLORS = [
     '#F538FF',   // O - Magenta
     '#FF8E0D',   // S - Orange
     '#FFE138',   // T - Yellow
-    '#3877FF'    // Z - Dodger Blue
+    '#3877FF',   // Z - Dodger Blue
+    '#800080'    // New Cross Piece - Purple
 ];
 
 const PIECES = [
@@ -32,7 +33,8 @@ const PIECES = [
     [[4, 4], [4, 4]], // O
     [[0, 5, 5], [5, 5, 0]], // S
     [[0, 6, 0], [6, 6, 6]], // T
-    [[7, 7, 0], [0, 7, 7]]  // Z
+    [[7, 7, 0], [0, 7, 7]],  // Z
+    [[0, 8, 0], [8, 8, 8], [0, 8, 0]] // Cross
 ];
 
 let board = [];
